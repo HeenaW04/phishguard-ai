@@ -1,0 +1,33 @@
+{
+  "dataset": "UCI PhiUSIIL Phishing URL Dataset",
+  "uci_id": 967,
+  "unique_records_used": 60000,
+  "train_records": 48000,
+  "test_records": 12000,
+  "features": [
+    "url_length",
+    "hostname_length",
+    "path_length",
+    "query_length",
+    "count_dots",
+    "count_hyphens",
+    "count_at",
+    "count_question",
+    "count_equal",
+    "count_percent",
+    "count_digits",
+    "count_slashes",
+    "count_subdomains",
+    "https_scheme",
+    "has_ip_address",
+    "suspicious_keyword_count",
+    "uses_url_shortener",
+    "has_double_slash_in_path"
+  ],
+  "best_model": "XGBoost",
+  "labels": {
+    "0": "phishing",
+    "1": "legitimate"
+  },
+  "limitation": "URL-text features only; no live webpage inspection."
+}
