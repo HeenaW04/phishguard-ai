@@ -1,72 +1,223 @@
+import os
+import json
+import zipfile
+import warnings
+import joblib
+import pandas as pd
+
 from pathlib import Path
-import json, warnings
-import joblib, pandas as pd
+from ucimlrepo import fetch_ucirepo
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.svm import SVC
+from sklearn.naive_bayes import ComplementNB
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    roc_auc_score
+)
+
 warnings.filterwarnings("ignore")
-ROOT=Path(__file__).resolve().parent; OUT=ROOT/"models"; OUT.mkdir(exist_ok=True)
-MAX_SAMPLES=60000; SEED=42
 
-def features(raw):
-    from urllib.parse import urlparse
-    import ipaddress
-    value=str(raw).strip()
-    if "://" not in value: value="https://"+value
-    p=urlparse(value); host=(p.hostname or "").lower(); path=p.path or ""; query=p.query or ""
-    try: ipaddress.ip_address(host); ip=1
-    except ValueError: ip=0
-    labels=[x for x in host.split(".") if x]; full=value.lower()
-    terms=["login","verify","secure","account","update","password","confirm","wallet","banking","signin","webscr"]
-    short={"bit.ly","tinyurl.com","t.co","goo.gl","ow.ly","is.gd","buff.ly","cutt.ly","rebrand.ly"}
-    return {"url_length":len(value),"hostname_length":len(host),"path_length":len(path),"query_length":len(query),
-    "count_dots":value.count("."),"count_hyphens":value.count("-"),"count_at":value.count("@"),
-    "count_question":value.count("?"),"count_equal":value.count("="),"count_percent":value.count("%"),
-    "count_digits":sum(c.isdigit() for c in value),"count_slashes":value.count("/"),
-    "count_subdomains":max(0,len(labels)-2),"https_scheme":int(p.scheme.lower()=="https"),
-    "has_ip_address":ip,"suspicious_keyword_count":sum(t in full for t in terms),
-    "uses_url_shortener":int(host in short),"has_double_slash_in_path":int("//" in path)}
+# 1. Create output folder
+OUT = Path("/content/phishguard_models")
+OUT.mkdir(parents=True, exist_ok=True)
 
-def main():
-    from ucimlrepo import fetch_ucirepo
-    print("Downloading UCI PhiUSIIL dataset (internet required)...")
-    ds=fetch_ucirepo(id=967); raw=ds.data.features.copy(); target=ds.data.targets.copy()
-    urlcol=next((c for c in raw.columns if str(c).strip().lower()=="url"),None)
-    if urlcol is None: raise ValueError("URL column not found: "+str(list(raw.columns)))
-    urls=raw[urlcol].astype(str).reset_index(drop=True)
-    y=pd.to_numeric(target.iloc[:,0],errors="coerce").reset_index(drop=True)
-    df=pd.DataFrame({"URL":urls,"target":y}).dropna().drop_duplicates("URL")
-    df=df[df.target.isin([0,1])].reset_index(drop=True)
-    if len(df)>MAX_SAMPLES:
-        per=min(MAX_SAMPLES//2,int(df.target.value_counts().min()))
-        df=df.groupby("target",group_keys=False).sample(n=per,random_state=SEED).reset_index(drop=True)
-    print("Unique records used:",len(df))
-    X=pd.DataFrame([features(u) for u in df.URL]); y=df.target.astype(int); cols=list(X.columns)
-    Xtr,Xte,ytr,yte=train_test_split(X,y,test_size=.2,random_state=SEED,stratify=y)
-    models={
-      "Random Forest":RandomForestClassifier(n_estimators=200,class_weight="balanced",random_state=SEED,n_jobs=-1),
-      "Extra Trees":ExtraTreesClassifier(n_estimators=200,class_weight="balanced",random_state=SEED,n_jobs=-1),
-      "Logistic Regression":Pipeline([("scale",StandardScaler()),("model",LogisticRegression(max_iter=1200,class_weight="balanced",random_state=SEED))]),
-      "SVM (RBF)":Pipeline([("scale",StandardScaler()),("model",SVC(C=2,probability=True,class_weight="balanced",random_state=SEED))])}
-    try:
-        from xgboost import XGBClassifier
-        models["XGBoost"]=XGBClassifier(n_estimators=200,max_depth=6,learning_rate=.08,subsample=.9,colsample_bytree=.9,eval_metric="logloss",random_state=SEED,n_jobs=-1)
-    except Exception as e: print("XGBoost skipped:",e)
-    rows=[]; fitted={}
-    for name,m in models.items():
-        print("Training",name); m.fit(Xtr,ytr); pred=m.predict(Xte)
-        row={"Model":name,"Accuracy":accuracy_score(yte,pred),"Precision_macro":precision_score(yte,pred,average="macro",zero_division=0),"Recall_macro":recall_score(yte,pred,average="macro",zero_division=0),"F1_macro":f1_score(yte,pred,average="macro",zero_division=0)}
-        if hasattr(m,"predict_proba"):
-            pr=m.predict_proba(Xte)[:,list(m.classes_).index(1)]; row["ROC_AUC_legitimate"]=roc_auc_score(yte,pr)
-        rows.append(row); fitted[name]=m; print(row)
-    metrics=pd.DataFrame(rows).sort_values("F1_macro",ascending=False)
-    best=str(metrics.iloc[0]["Model"])
-    joblib.dump({"models":fitted,"best_model_name":best,"feature_columns":cols,"label_mapping":{"0":"Potentially phishing","1":"Likely legitimate"}},OUT/"model_bundle.joblib",compress=3)
-    metrics.to_csv(OUT/"model_comparison.csv",index=False)
-    (OUT/"training_summary.json").write_text(json.dumps({"dataset":"UCI PhiUSIIL Phishing URL Dataset","uci_id":967,"unique_records_used":len(df),"train_records":len(Xtr),"test_records":len(Xte),"features":cols,"best_model":best,"labels":{"0":"phishing","1":"legitimate"},"limitation":"URL-text features only; no live webpage inspection."},indent=2))
-    print("\\nSaved model bundle and benchmark to",OUT)
-if __name__=="__main__": main()
+# 2. Download dataset
+print("Downloading UCI PhiUSIIL dataset...")
+dataset = fetch_ucirepo(id=967)
+
+features = dataset.data.features
+targets = dataset.data.targets
+
+url_column = next(
+    (c for c in features.columns if str(c).strip().lower() == "url"),
+    None
+)
+
+if url_column is None:
+    raise ValueError(
+        "URL column not found. Available columns: "
+        + str(list(features.columns))
+    )
+
+urls = features[url_column].astype(str).str.strip()
+labels = pd.to_numeric(targets.iloc[:, 0], errors="coerce")
+
+# 3. Prepare data
+df = pd.DataFrame({
+    "url": urls,
+    "label": labels
+}).dropna()
+
+df = df[
+    (df["url"] != "") &
+    (df["label"].isin([0, 1]))
+].drop_duplicates(subset="url").reset_index(drop=True)
+
+# UCI PhiUSIIL labels: 0 = phishing, 1 = legitimate
+df["label"] = df["label"].astype(int)
+
+# Limit dataset size to reduce Colab memory usage
+if len(df) > 60000:
+    per_class = min(30000, int(df["label"].value_counts().min()))
+    df = (
+        df.groupby("label", group_keys=False)
+          .sample(n=per_class, random_state=42)
+          .sample(frac=1, random_state=42)
+          .reset_index(drop=True)
+    )
+
+print("\nDataset size:", len(df))
+print("\nLabels (0=phishing, 1=legitimate):")
+print(df["label"].value_counts().sort_index())
+
+# 4. Split data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(
+    df["url"],
+    df["label"],
+    test_size=0.20,
+    random_state=42,
+    stratify=df["label"]
+)
+
+# 5. Define models
+models = {
+    "Logistic Regression": Pipeline([
+        ("tfidf", TfidfVectorizer(
+            analyzer="char",
+            ngram_range=(3, 5),
+            min_df=2,
+            max_features=100000,
+            sublinear_tf=True
+        )),
+        ("classifier", LogisticRegression(
+            max_iter=1500,
+            class_weight="balanced",
+            random_state=42
+        ))
+    ]),
+
+    "Complement Naive Bayes": Pipeline([
+        ("tfidf", TfidfVectorizer(
+            analyzer="char",
+            ngram_range=(3, 5),
+            min_df=2,
+            max_features=100000,
+            sublinear_tf=True
+        )),
+        ("classifier", ComplementNB(alpha=0.5))
+    ])
+}
+
+# 6. Train and evaluate
+results = []
+trained_models = {}
+
+for name, model in models.items():
+    print(f"\nTraining {name}...")
+    model.fit(X_train, y_train)
+
+    predictions = model.predict(X_test)
+
+    result = {
+        "Model": name,
+        "Accuracy": round(accuracy_score(y_test, predictions), 4),
+        "Precision_macro": round(
+            precision_score(y_test, predictions,
+                            average="macro", zero_division=0), 4
+        ),
+        "Recall_macro": round(
+            recall_score(y_test, predictions,
+                         average="macro", zero_division=0), 4
+        ),
+        "F1_macro": round(
+            f1_score(y_test, predictions,
+                     average="macro", zero_division=0), 4
+        )
+    }
+
+    # Confusion matrix order: phishing (0), legitimate (1)
+    cm = confusion_matrix(y_test, predictions, labels=[0, 1])
+    result["Correct_phishing"] = int(cm[0, 0])
+    result["Phishing_missed"] = int(cm[0, 1])
+    result["Legitimate_flagged_phishing"] = int(cm[1, 0])
+    result["Correct_legitimate"] = int(cm[1, 1])
+
+    if hasattr(model, "predict_proba"):
+        probs = model.predict_proba(X_test)[
+            :, list(model.classes_).index(1)
+        ]
+        result["ROC_AUC_legitimate"] = round(
+            roc_auc_score(y_test, probs), 4
+        )
+
+    results.append(result)
+    trained_models[name] = model
+
+    print(pd.Series(result).to_string())
+
+# 7. Select model with highest macro F1
+metrics = pd.DataFrame(results).sort_values(
+    "F1_macro", ascending=False
+)
+best_name = str(metrics.iloc[0]["Model"])
+
+# 8. Save the model bundle
+bundle = {
+    "models": trained_models,
+    "best_model_name": best_name,
+    "label_mapping": {
+        "0": "Potentially phishing",
+        "1": "Likely legitimate"
+    },
+    "dataset": "UCI PhiUSIIL",
+    "input_type": "raw URL text",
+    "limitations": (
+        "URL-only screening; does not inspect webpage content "
+        "or live website reputation."
+    )
+}
+
+joblib.dump(bundle, OUT / "model_bundle.joblib", compress=3)
+metrics.to_csv(OUT / "model_comparison.csv", index=False)
+
+summary = {
+    "best_model": best_name,
+    "records_used": int(len(df)),
+    "training_records": int(len(X_train)),
+    "testing_records": int(len(X_test)),
+    "label_mapping": {
+        "0": "phishing",
+        "1": "legitimate"
+    },
+    "results": results
+}
+
+(OUT / "training_summary.json").write_text(
+    json.dumps(summary, indent=2)
+)
+
+# 9. Create ZIP containing the generated model files
+zip_path = "/content/trained_models.zip"
+
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+    for file in OUT.iterdir():
+        if file.is_file():
+            z.write(file, arcname=file.name)
+
+print("\nTRAINING COMPLETED")
+print("Best model:", best_name)
+print("Saved files:", list(os.listdir(OUT)))
+print("ZIP created at:", zip_path)
+
+# 10. Display benchmark table
+display(metrics)
+
+# 11. Download the trained files
+from google.colab import files
+files.download(zip_path)
