@@ -1,250 +1,222 @@
 
+import re
 from pathlib import Path
 from urllib.parse import urlparse
-import ipaddress
 
 import joblib
 import pandas as pd
 import streamlit as st
 
-
-# --------------------------------------------------
-# Page configuration
-# --------------------------------------------------
 st.set_page_config(
     page_title="PhishGuard AI",
     page_icon="🛡️",
-    layout="wide",
+    layout="wide"
 )
+
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_PATH = BASE_DIR / "models" / "model_bundle.joblib"
+RESULTS_PATH = BASE_DIR / "models" / "model_comparison.csv"
 
 st.title("🛡️ PhishGuard AI")
-st.header("Machine Learning Based Phishing URL Detection")
+st.subheader("Machine Learning-Based Phishing URL Detection")
+
 st.write(
-    "Analyze a website URL using trained machine learning "
-    "models to identify potentially suspicious addresses."
+    "Analyze URL text using trained machine learning models. "
+    "This is a research and educational tool, not a guarantee of website safety."
 )
-
-st.warning(
-    "Educational prototype only. This tool analyzes URL text; "
-    "it does not visit websites, inspect webpage content, or "
-    "check live security reputation. Predictions can be wrong."
-)
-
-
-# --------------------------------------------------
-# Load trained model bundle
-# --------------------------------------------------
-MODEL_PATH = Path(__file__).parent / "models" / "model_bundle.joblib"
-COMPARISON_PATH = Path(__file__).parent / "models" / "model_comparison.csv"
-
 
 @st.cache_resource
-def load_model_bundle():
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(
-            f"Trained model not found at: {MODEL_PATH}. "
-            "Upload model_bundle.joblib into the models folder."
-        )
-
+def load_bundle():
     return joblib.load(MODEL_PATH)
 
+@st.cache_data
+def load_comparison():
+    if RESULTS_PATH.exists():
+        return pd.read_csv(RESULTS_PATH)
+    return pd.DataFrame()
 
-def normalize_url(url):
-    url = url.strip()
+if not MODEL_PATH.exists():
+    st.error("Model bundle not found: models/model_bundle.joblib")
+    st.info("Upload the trained model bundle to the GitHub models/ folder.")
+    st.stop()
 
-    if not url:
-        raise ValueError("Please enter a URL.")
+try:
+    bundle = load_bundle()
+except Exception as exc:
+    st.error(f"Could not load model bundle: {exc}")
+    st.stop()
 
-    # Allow users to enter example.com without https://
-    if "://" not in url:
-        url = "https://" + url
+models = bundle["models"]
+best_model_name = bundle.get("best_model_name", list(models)[0])
 
-    parsed = urlparse(url)
+st.success(f"Loaded {len(models)} trained models.")
 
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise ValueError(
-            "Enter a valid URL, such as https://example.com"
-        )
+st.caption(f"Best model based on validation metric: {best_model_name}")
 
-    return url
+model_names = list(models.keys())
+default_index = (
+    model_names.index(best_model_name)
+    if best_model_name in model_names else 0
+)
 
+selected_model_name = st.selectbox(
+    "Choose a trained model",
+    model_names,
+    index=default_index
+)
 
-def get_url_details(url):
-    parsed = urlparse(url)
-    hostname = parsed.hostname or ""
+url = st.text_input(
+    "Enter a URL",
+    placeholder="https://www.google.com/"
+)
+
+def inspect_url(raw_url):
+    candidate = raw_url.strip()
+
+    if not candidate:
+        return None, "Please enter a URL."
+
+    if any(ch.isspace() for ch in candidate):
+        return None, "The URL must not contain spaces."
+
+    # Add a scheme only to make ordinary domain input parseable.
+    if "://" not in candidate:
+        candidate = "https://" + candidate
+
+    parsed = urlparse(candidate)
+
+    if parsed.scheme not in ("http", "https"):
+        return None, "Only HTTP and HTTPS URLs are supported."
+
+    if not parsed.hostname:
+        return None, "Please enter a valid hostname."
 
     try:
-        ipaddress.ip_address(hostname)
-        uses_ip = True
-    except ValueError:
-        uses_ip = False
+        parsed.hostname.encode("idna")
+        _ = parsed.port
+    except (UnicodeError, ValueError):
+        return None, "The hostname or port is invalid."
 
-    return {
-        "Hostname": hostname,
-        "HTTPS used": parsed.scheme == "https",
-        "URL length": len(url),
-        "Subdomain count": max(0, len(hostname.split(".")) - 2),
-        "IP address used as host": uses_ip,
-        "Non-standard port specified": parsed.port is not None
-        and parsed.port not in (80, 443),
+    return candidate, None
+
+if st.button("Analyze URL", type="primary"):
+    normalized_url, error = inspect_url(url)
+
+    if error:
+        st.error(error)
+    else:
+        model = models[selected_model_name]
+
+        # Pass raw text to the complete TF-IDF + classifier pipeline.
+        prediction = int(model.predict([normalized_url])[0])
+
+        st.session_state["last_url"] = normalized_url
+        st.session_state["last_model"] = selected_model_name
+        st.session_state["last_prediction"] = prediction
+
+if "last_prediction" in st.session_state:
+    prediction = st.session_state["last_prediction"]
+    normalized_url = st.session_state["last_url"]
+    selected = st.session_state["last_model"]
+
+    st.markdown("---")
+    st.subheader("Prediction result")
+
+    if prediction == 0:
+        st.error("⚠️ Model classification: Potentially phishing")
+    else:
+        st.success("Model classification: Likely legitimate")
+
+    st.caption(
+        "This is a model prediction, not a verified safety assessment. "
+        "A legitimate-looking URL can still be dangerous, and a "
+        "phishing detector can make mistakes."
+    )
+
+    st.write("**Analyzed URL:**", normalized_url)
+    st.write("**Selected model:**", selected)
+
+    parsed = urlparse(normalized_url)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Hostname", parsed.hostname or "Unknown")
+        st.metric("HTTPS scheme", "Yes" if parsed.scheme == "https" else "No")
+    with col2:
+        st.metric("URL length", len(normalized_url))
+        st.metric("Subdomain count", max(0, len(
+            (parsed.hostname or "").split(".")
+        ) - 2))
+
+    host = parsed.hostname or ""
+    indicators = {
+        "IP address in hostname": bool(
+            re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", host)
+        ),
+        "Contains @ symbol": "@" in normalized_url,
+        "Contains URL shortener-like host": any(
+            short in host.lower()
+            for short in ["bit.ly", "tinyurl.com", "t.co", "goo.gl"]
+        ),
+        "Contains unusually long URL": len(normalized_url) > 100,
     }
 
-
-# --------------------------------------------------
-# URL input and model selection
-# --------------------------------------------------
-left, right = st.columns([1.4, 1])
-
-with left:
-    st.subheader("Enter a URL")
-
-    url_input = st.text_input(
-        "Website address",
-        placeholder="https://www.example.com",
+    st.subheader("Basic URL indicators")
+    st.dataframe(
+        pd.DataFrame(
+            [{"Indicator": k, "Detected": "Yes" if v else "No"}
+             for k, v in indicators.items()]
+        ),
+        use_container_width=True,
+        hide_index=True
     )
 
-    bundle = None
-    load_error = None
-
-    try:
-        bundle = load_model_bundle()
-    except Exception as exc:
-        load_error = str(exc)
-
-    if load_error:
-        st.error(f"Model loading error: {load_error}")
-
-    if bundle is not None:
-        models = bundle.get("models", {})
-
-        if not models:
-            st.error(
-                "No trained classifiers were found inside the model bundle. "
-                "Check the training script and saved bundle format."
-            )
-            selected_model = None
-        else:
-            model_names = list(models.keys())
-            default_name = bundle.get("best_model_name", model_names[0])
-
-            if default_name not in model_names:
-                default_name = model_names[0]
-
-            selected_model = st.selectbox(
-                "Choose a machine learning model",
-                options=model_names,
-                index=model_names.index(default_name),
-            )
-
-        analyze = st.button(
-            "🔎 Analyze URL",
-            type="primary",
-            use_container_width=True,
-        )
-    else:
-        selected_model = None
-        analyze = st.button(
-            "🔎 Analyze URL",
-            type="primary",
-            use_container_width=True,
-            disabled=True,
-        )
-
-with right:
-    st.subheader("How it works")
-    st.markdown(
-        """
-        1. Read and normalize the submitted URL.
-        2. Extract character-pattern features using TF-IDF.
-        3. Apply the selected trained classifier.
-        4. Display the prediction and available benchmark results.
-        """
+    st.caption(
+        "These are simple heuristics, not proof of phishing. "
+        "HTTPS and a short URL do not guarantee safety."
     )
 
+st.markdown("---")
+st.subheader("Model performance comparison")
 
-# --------------------------------------------------
-# Prediction
-# --------------------------------------------------
-if analyze and bundle is not None and selected_model is not None:
-    try:
-        url = normalize_url(url_input)
-        model = bundle["models"][selected_model]
+comparison = load_comparison()
 
-        # The trained pipeline performs its own TF-IDF transformation.
-        # Do not convert the URL string to float or create numeric
-        # features here.
-        prediction = model.predict([url])[0]
+if not comparison.empty:
+    st.dataframe(
+        comparison.round(4),
+        use_container_width=True,
+        hide_index=True
+    )
 
-        st.divider()
-        st.subheader("Analysis Result")
+    metric_options = [
+        col for col in [
+            "Accuracy", "Precision_macro",
+            "Recall_macro", "F1_macro", "ROC_AUC"
+        ]
+        if col in comparison.columns
+    ]
 
-        # Training dataset convention:
-        # 0 = phishing, 1 = legitimate.
-        if str(prediction) == "0":
-            st.error("⚠️ Potentially Phishing URL")
-        elif str(prediction) == "1":
-            st.success("✅ Likely Legitimate URL")
-        else:
-            st.info(f"Model prediction: {prediction}")
-
-        # Show probabilities when the classifier supports them.
-        if hasattr(model, "predict_proba"):
-            probabilities = model.predict_proba([url])[0]
-            classes = list(model.classes_)
-
-            probability_map = {
-                str(label): float(prob)
-                for label, prob in zip(classes, probabilities)
-            }
-
-            predicted_probability = probability_map.get(
-                str(prediction)
+    if metric_options:
+        metric = st.selectbox(
+            "Metric for comparison chart",
+            metric_options,
+            index=(
+                metric_options.index("F1_macro")
+                if "F1_macro" in metric_options else 0
             )
-
-            if predicted_probability is not None:
-                st.metric(
-                    "Model confidence for predicted class",
-                    f"{predicted_probability * 100:.2f}%",
-                )
-
-        st.caption(
-            "This percentage is the model's predicted class probability, "
-            "not a verified probability that the website is malicious."
         )
 
-        st.subheader("URL Details")
-        st.dataframe(
-            pd.DataFrame(
-                list(get_url_details(url).items()),
-                columns=["Feature", "Value"],
-            ),
-            hide_index=True,
-            use_container_width=True,
-        )
-
-    except Exception as exc:
-        st.error(f"Unable to analyze this URL: {exc}")
-
-
-# --------------------------------------------------
-# Model benchmark results
-# --------------------------------------------------
-st.divider()
-st.subheader("Model Performance Comparison")
-
-if COMPARISON_PATH.exists():
-    try:
-        comparison = pd.read_csv(COMPARISON_PATH)
-        st.dataframe(comparison, hide_index=True, use_container_width=True)
-    except Exception as exc:
-        st.info(f"Could not read the comparison file: {exc}")
+        chart = comparison.set_index("Model")[[metric]]
+        st.bar_chart(chart)
 else:
-    st.info(
-        "Model comparison file is not available yet. "
-        "Upload model_comparison.csv into the models folder."
+    st.warning(
+        "Model comparison file not found. "
+        "Add models/model_comparison.csv to the repository."
     )
 
+st.markdown("---")
 st.caption(
-    "PhishGuard AI is an educational machine learning prototype. "
-    "Do not use its prediction as the only basis for a security decision."
+    "PhishGuard AI | Academic ML project | "
+    "Predictions may be incorrect; do not rely on this app alone "
+    "to decide whether to visit a website."
 )
