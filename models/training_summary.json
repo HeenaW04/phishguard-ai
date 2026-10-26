@@ -1,33 +1,36 @@
 {
-  "dataset": "UCI PhiUSIIL Phishing URL Dataset",
-  "uci_id": 967,
-  "unique_records_used": 60000,
-  "train_records": 48000,
-  "test_records": 12000,
-  "features": [
-    "url_length",
-    "hostname_length",
-    "path_length",
-    "query_length",
-    "count_dots",
-    "count_hyphens",
-    "count_at",
-    "count_question",
-    "count_equal",
-    "count_percent",
-    "count_digits",
-    "count_slashes",
-    "count_subdomains",
-    "https_scheme",
-    "has_ip_address",
-    "suspicious_keyword_count",
-    "uses_url_shortener",
-    "has_double_slash_in_path"
-  ],
-  "best_model": "XGBoost",
-  "labels": {
+  "best_model": "Logistic Regression",
+  "records_used": 60000,
+  "training_records": 48000,
+  "testing_records": 12000,
+  "label_mapping": {
     "0": "phishing",
     "1": "legitimate"
   },
-  "limitation": "URL-text features only; no live webpage inspection."
+  "results": [
+    {
+      "Model": "Logistic Regression",
+      "Accuracy": 0.9951,
+      "Precision_macro": 0.9951,
+      "Recall_macro": 0.9951,
+      "F1_macro": 0.9951,
+      "Correct_phishing": 5941,
+      "Phishing_missed": 59,
+      "Legitimate_flagged_phishing": 0,
+      "Correct_legitimate": 6000,
+      "ROC_AUC_legitimate": 0.9983
+    },
+    {
+      "Model": "Complement Naive Bayes",
+      "Accuracy": 0.9513,
+      "Precision_macro": 0.9547,
+      "Recall_macro": 0.9513,
+      "F1_macro": 0.9512,
+      "Correct_phishing": 5447,
+      "Phishing_missed": 553,
+      "Legitimate_flagged_phishing": 32,
+      "Correct_legitimate": 5968,
+      "ROC_AUC_legitimate": 0.9953
+    }
+  ]
 }
