@@ -1,79 +1,217 @@
-import joblib, pandas as pd, streamlit as st
+
+import ipaddress
 from pathlib import Path
 from urllib.parse import urlparse
-import ipaddress
 
-ROOT=Path(__file__).resolve().parent
-MODEL=ROOT/"models"/"model_bundle.joblib"
-METRICS=ROOT/"models"/"model_comparison.csv"
-st.set_page_config(page_title="PhishGuard AI", page_icon="🛡️", layout="wide")
+import joblib
+import pandas as pd
+import streamlit as st
 
-def extract_url_features(raw):
-    value=raw.strip()
-    if not value: raise ValueError("Enter a URL first.")
-    if "://" not in value: value="https://"+value
-    p=urlparse(value); host=(p.hostname or "").lower()
-    if not host: raise ValueError("Enter a valid URL, such as example.com.")
-    try: ipaddress.ip_address(host); has_ip=1
-    except ValueError: has_ip=0
-    labels=[x for x in host.split(".") if x]
-    terms=["login","verify","secure","account","update","password","confirm","wallet","banking","signin","webscr"]
-    shorteners={"bit.ly","tinyurl.com","t.co","goo.gl","ow.ly","is.gd","buff.ly","cutt.ly","rebrand.ly"}
-    full=value.lower(); path=p.path or ""; query=p.query or ""
-    return {
-      "url_length":len(value),"hostname_length":len(host),"path_length":len(path),"query_length":len(query),
-      "count_dots":value.count("."),"count_hyphens":value.count("-"),"count_at":value.count("@"),
-      "count_question":value.count("?"),"count_equal":value.count("="),"count_percent":value.count("%"),
-      "count_digits":sum(c.isdigit() for c in value),"count_slashes":value.count("/"),
-      "count_subdomains":max(0,len(labels)-2),"https_scheme":int(p.scheme.lower()=="https"),
-      "has_ip_address":has_ip,"suspicious_keyword_count":sum(t in full for t in terms),
-      "uses_url_shortener":int(host in shorteners),"has_double_slash_in_path":int("//" in path)
-    }
+ROOT = Path(__file__).resolve().parent
+MODEL_PATH = ROOT / "models" / "model_bundle.joblib"
+METRICS_PATH = ROOT / "models" / "model_comparison.csv"
+
+st.set_page_config(
+    page_title="PhishGuard AI",
+    page_icon="🛡️",
+    layout="wide"
+)
+
+
+def normalize_url(raw_url):
+    url = str(raw_url).strip().lower()
+
+    if not url:
+        raise ValueError("Please enter a website URL.")
+
+    if "://" not in url:
+        url = "https://" + url
+
+    parsed = urlparse(url)
+
+    if not parsed.hostname:
+        raise ValueError(
+            "Invalid URL. Try entering example.com"
+        )
+
+    try:
+        ipaddress.ip_address(parsed.hostname)
+        host_type = "IP address"
+    except ValueError:
+        host_type = "Domain name"
+
+    return url, parsed, host_type
+
 
 @st.cache_resource
-def load_bundle():
-    return joblib.load(MODEL) if MODEL.exists() else None
+def load_model():
+    if not MODEL_PATH.exists():
+        return None
+
+    return joblib.load(MODEL_PATH)
+
 
 st.title("🛡️ PhishGuard AI")
-st.caption("Machine-learning-assisted phishing URL screening")
-st.warning("Educational prototype only. This app analyzes URL text; it does not visit the website, inspect HTML, check live reputation, or guarantee safety.")
-bundle=load_bundle()
+st.subheader("Machine Learning Based Phishing URL Detection")
+
+st.write(
+    "Analyze URL text using machine learning to identify "
+    "potentially suspicious website addresses."
+)
+
+st.warning(
+    "Educational prototype only. This tool analyzes URL text; "
+    "it does not visit websites, inspect webpage content, or "
+    "check live security reputation. Predictions can be wrong."
+)
+
+bundle = load_model()
+
 if bundle is None:
-    st.error("Trained model files are missing. Follow the Google Colab steps in README.md, then add the generated models/ folder to this project.")
+    st.error(
+        "Trained model not found. Please add "
+        "models/model_bundle.joblib to your GitHub repository."
+    )
     st.stop()
 
-left,right=st.columns([1,1.1])
+models = bundle.get("models", {})
+
+if not models:
+    st.error("No trained classifiers were found in the model file.")
+    st.stop()
+
+model_names = list(models.keys())
+best_name = bundle.get("best_model_name", model_names[0])
+
+if best_name not in model_names:
+    best_name = model_names[0]
+
+left, right = st.columns(2)
+
 with left:
-    st.subheader("Check a URL")
-    url=st.text_input("Website URL",placeholder="https://example.com/account")
-    names=list(bundle["models"])
-    selected=st.selectbox("Classifier",names,index=names.index(bundle.get("best_model_name",names[0])))
-    run=st.button("Analyze URL",type="primary",use_container_width=True)
-    st.caption("The app does not open the submitted URL.")
+    st.markdown("### Enter a URL")
+
+    url_input = st.text_input(
+        "Website address",
+        placeholder="https://www.example.com"
+    )
+
+    selected_model = st.selectbox(
+        "Choose a machine learning model",
+        model_names,
+        index=model_names.index(best_name)
+    )
+
+    analyze = st.button(
+        "🔍 Analyze URL",
+        type="primary",
+        use_container_width=True
+    )
+
 with right:
-    st.subheader("Method")
-    st.markdown("1. Extract URL-text features.\\n2. Apply the trained classifier.\\n3. Display prediction and model score.\\n4. Compare models on held-out test data.")
-if run:
+    st.markdown("### How it works")
+
+    st.markdown(
+        """
+        1. Read and normalize the submitted URL.
+        2. Extract character-pattern features using TF-IDF.
+        3. Apply the selected trained classifier.
+        4. Display the prediction and model benchmark results.
+        """
+    )
+
+if analyze:
     try:
-        row=pd.DataFrame([extract_url_features(url)],columns=bundle["feature_columns"])
-        model=bundle["models"][selected]; pred=int(model.predict(row)[0])
-        score=None
-        if hasattr(model,"predict_proba"):
-            probs=model.predict_proba(row)[0]
-            score=float(probs[list(model.classes_).index(pred)])
-        if pred==0:
+        normalized_url, parsed, host_type = normalize_url(
+            url_input
+        )
+
+        classifier = models[selected_model]
+        prediction = int(classifier.predict([normalized_url])[0])
+
+        st.markdown("---")
+        st.markdown("### Analysis Result")
+
+        st.write("**Hostname:**", parsed.hostname)
+        st.write("**Host type:**", host_type)
+
+        if prediction == 0:
             st.error("⚠️ Prediction: Potentially phishing")
-            st.write("Treat this URL cautiously. Do not enter passwords, payment details, or one-time codes.")
-        else:
+            st.write(
+                "Avoid entering passwords, payment information, "
+                "or verification codes until the website is "
+                "independently verified."
+            )
+        elif prediction == 1:
             st.success("✅ Prediction: Likely legitimate")
-            st.write("This is not a guarantee that the website is safe.")
-        a,b=st.columns(2); a.metric("Classifier",selected); b.metric("Score for predicted class",f"{score:.1%}" if score is not None else "Unavailable")
-        with st.expander("Show extracted features"):
-            st.dataframe(pd.DataFrame([extract_url_features(url)]).T.rename(columns={0:"Value"}))
-    except Exception as e: st.error(f"Could not analyze input: {e}")
-st.divider(); st.subheader("Model benchmark")
-if METRICS.exists():
-    metrics=pd.read_csv(METRICS); st.dataframe(metrics,use_container_width=True,hide_index=True)
-    if "F1_macro" in metrics.columns: st.bar_chart(metrics.set_index("Model")["F1_macro"])
-else: st.info("Benchmark table appears after training.")
-st.caption("Lexical URL features can produce false positives and false negatives. Do not use this prototype as the only security control.")
+            st.write(
+                "This prediction does not guarantee that the "
+                "website is safe."
+            )
+        else:
+            st.warning("The model returned an unexpected label.")
+
+        if hasattr(classifier, "predict_proba"):
+            probabilities = classifier.predict_proba(
+                [normalized_url]
+            )[0]
+
+            class_index = list(classifier.classes_).index(
+                prediction
+            )
+
+            score = float(probabilities[class_index])
+
+            st.metric(
+                "Model score for predicted class",
+                f"{score:.1%}"
+            )
+
+            st.caption(
+                "This is a model probability estimate, not a "
+                "verified website safety score."
+            )
+
+        with st.expander("View URL details"):
+            st.write({
+                "Normalized URL": normalized_url,
+                "Hostname": parsed.hostname,
+                "Protocol": parsed.scheme,
+                "Path": parsed.path
+            })
+
+    except Exception as error:
+        st.error(f"Unable to analyze this URL: {error}")
+
+st.divider()
+st.markdown("### Model Performance Comparison")
+
+if METRICS_PATH.exists():
+    try:
+        metrics = pd.read_csv(METRICS_PATH)
+
+        st.dataframe(
+            metrics,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        if "F1_macro" in metrics.columns:
+            st.markdown("#### Macro F1-score")
+            st.bar_chart(
+                metrics.set_index("Model")["F1_macro"]
+            )
+
+    except Exception as error:
+        st.warning(f"Could not load benchmark results: {error}")
+else:
+    st.info(
+        "Model comparison will appear after the training script "
+        "generates model_comparison.csv."
+    )
+
+st.caption(
+    "PhishGuard AI is a machine-learning demonstration. "
+    "URL-only detection can produce false positives and "
+    "false negatives. Do not rely on it as your only security check."
+)
